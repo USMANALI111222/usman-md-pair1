@@ -1,16 +1,5 @@
 'use strict';
 
-const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  DisconnectReason,
-  fetchLatestBaileysVersion,
-  makeCacheableSignalKeyStore,
-  getContentType,
-  jidNormalizedUser,
-  Browsers,
-} = require('@whiskeysockets/baileys');
-
 const pino      = require('pino');
 const { Boom }  = require('@hapi/boom');
 const path      = require('path');
@@ -21,23 +10,37 @@ const NodeCache = require('node-cache');
 const http      = require('http');
 const config    = require('./config');
 
+// ── ESM BAILEYS (dynamic import fix) ─────────────────────────
+let makeWASocket, useMultiFileAuthState, DisconnectReason,
+    fetchLatestBaileysVersion, makeCacheableSignalKeyStore,
+    getContentType, jidNormalizedUser, Browsers;
+
+async function loadBaileys() {
+  const B = await import('@whiskeysockets/baileys');
+  makeWASocket               = B.default || B.makeWASocket;
+  useMultiFileAuthState      = B.useMultiFileAuthState;
+  DisconnectReason           = B.DisconnectReason;
+  fetchLatestBaileysVersion  = B.fetchLatestBaileysVersion;
+  makeCacheableSignalKeyStore = B.makeCacheableSignalKeyStore;
+  getContentType             = B.getContentType;
+  jidNormalizedUser          = B.jidNormalizedUser;
+  Browsers                   = B.Browsers;
+}
+
 // ── WEB SERVER (Railway pairing site) ────────────────────────
 const PORT = process.env.PORT || 3000;
 
-// Global reference to the active socket (for /pair endpoint)
 let activeSock = null;
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
 
-  // Serve pairing page
   if (url.pathname === '/' || url.pathname === '/index.html') {
     const html = fs.readFileSync(path.join(__dirname, 'index.html'));
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     return res.end(html);
   }
 
-  // Pairing API
   if (url.pathname === '/pair') {
     const number = url.searchParams.get('number')?.replace(/\D/g, '');
     if (!number || number.length < 7) {
@@ -140,43 +143,6 @@ function printBanner() {
   ));
 }
 
-// ── PAIRING ──────────────────────────────────────────────────
-function askNumber() {
-  return new Promise(resolve => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    console.log(chalk.yellow(
-      '\n  ┌──────────────────────────────────────────┐\n' +
-      '  │      ᴜsᴍᴀɴ ᴍᴅ v1.0 — PAIRING CODE         │\n' +
-      '  └──────────────────────────────────────────┘'
-    ));
-    console.log(chalk.gray('  Enter number with country code, no + no spaces'));
-    console.log(chalk.gray('  Example: 923001234567\n'));
-    rl.question(chalk.cyan('  ▶ Your WhatsApp Number: '), ans => {
-      rl.close();
-      resolve(ans.replace(/[^0-9]/g, ''));
-    });
-  });
-}
-
-function showCode(code) {
-  const fmt = code?.match(/.{1,4}/g)?.join('-') || code;
-  console.log('');
-  console.log(chalk.bgRed.white.bold('  ╔══════════════════════════════════════════╗'));
-  console.log(chalk.bgRed.white.bold('  ║                                          ║'));
-  console.log(chalk.bgRed.white.bold('  ║   PAIRING CODE : ' + String(fmt).padEnd(24) + '║'));
-  console.log(chalk.bgRed.white.bold('  ║                                          ║'));
-  console.log(chalk.bgRed.white.bold('  ╚══════════════════════════════════════════╝'));
-  console.log('');
-  console.log(chalk.white.bold('  HOW TO LINK:'));
-  console.log(chalk.white('  1. Open WhatsApp → tap ⋮ Menu'));
-  console.log(chalk.white('  2. Linked Devices → Link a Device'));
-  console.log(chalk.white('  3. Tap "Link with phone number instead"'));
-  console.log(chalk.white('  4. Enter code: ' + chalk.bold.red(fmt)));
-  console.log('');
-  console.log(chalk.yellow('  ⏳ Waiting... code expires in ~60s'));
-  console.log(chalk.gray('  If expired: delete auth_info_baileys/ and restart\n'));
-}
-
 // ── HELPERS ──────────────────────────────────────────────────
 const cleanJid  = jid => (jid || '').replace(/:[0-9]+@/, '@');
 const getSender = msg  => cleanJid(msg.key.participant || msg.key.remoteJid || '');
@@ -246,7 +212,7 @@ const reactMap = {
   weather:'🌤️', translate:'🌐', wiki:'📖', qr:'📷', calc:'🧮', currency:'💱',
   joke:'😂', fact:'🤓', quote:'💡', '8ball':'🎱', truth:'🤫', dare:'🎯',
   ship:'💘', rate:'⭐', roast:'🔥', compliment:'💝', dice:'🎲', flip:'🪙',
-  ai:'🤖', imagine:'🎨', lyrics:'🎵', movie:'🎬', tts:'🔊',
+  ai:'🤖', imagine:'🎨', lyrics:'🎵', movie:'🎬',
   broadcast:'📢', restart:'🔄', shutdown:'🛑', menu:'📋',
   gimage:'🖼️', tinyurl:'🔗', whois:'🔍', ss:'📸', ocr:'🔎',
   dp:'🖼️', pair:'🔗',
@@ -287,6 +253,8 @@ async function startBot() {
   if (isBooting) return;
   isBooting = true;
 
+  await loadBaileys();
+
   printBanner();
   loadPlugins();
 
@@ -306,7 +274,6 @@ async function startBot() {
   const sock = buildSocket(state, waVersion);
   sock.ev.on('creds.update', saveCreds);
 
-  // ── PAIRING CODE (web-based via /pair endpoint) ──────────
   activeSock = sock;
   if (!sock.authState.creds.registered) {
     console.log(chalk.yellow('\n  ⏳ Bot not yet paired.'));
@@ -421,7 +388,6 @@ async function handleMessage(sock, msg) {
   const isOwner = isOwnerCheck(msg);
   if (msg.key.fromMe && !body.startsWith(config.prefix)) return;
 
-  // Anti-spam
   const sender = getSender(msg);
   if (config.antiSpam && !isOwner) {
     const now = Date.now();
@@ -437,7 +403,6 @@ async function handleMessage(sock, msg) {
   const isGrp = isGrpJid(jid);
   if (isGrp && botState.mutedGroups[jid] && !isOwner) return;
 
-  // Anti-link
   if (isGrp && botState.antiLinkGroups[jid] && !isOwner) {
     const linkRx = /(https?:\/\/\S+|wa\.me\/\S+|chat\.whatsapp\.com\/\S+)/i;
     if (linkRx.test(body)) {
@@ -487,9 +452,9 @@ async function handleMessage(sock, msg) {
     channelJid     : config.channelJid,
     animeImg       : config.animeImg,
     store,
-    reply   : text           => sendReply(sock, jid, text, msg),
-    send    : text           => sendReply(sock, jid, text, null),
-    react   : emoji          => sock.sendMessage(jid, { react: { text: emoji, key: msg.key } }).catch(() => {}),
+    reply   : text            => sendReply(sock, jid, text, msg),
+    send    : text            => sendReply(sock, jid, text, null),
+    react   : emoji           => sock.sendMessage(jid, { react: { text: emoji, key: msg.key } }).catch(() => {}),
     rawSend : (content, opts) => sock.sendMessage(jid, content, { quoted: msg, ...(opts || {}) }),
   };
 
@@ -523,12 +488,12 @@ async function handleGroupUpdate(sock, update) {
         '🎉 Welcome @' + num + '!\n' +
         '📌 Group: *' + meta.subject + '*\n' +
         '👥 Members: *' + meta.participants.length + '*\n\n' +
-        '_Read the rules and enjoy!_\n~ ᴜsᴍᴀɴ ᴍᴅ v15', null
+        '_Read the rules and enjoy!_\n~ ᴜsᴍᴀɴ ᴍᴅ v1.0', null
       ).catch(() => {});
     }
     if (action === 'remove' && config.goodbyeMsg) {
       sock.sendMessage(id, {
-        text     : '👋 *@' + num + '* left *' + meta.subject + '*\n~ ᴜsᴍᴀɴ ᴍᴅ v15',
+        text     : '👋 *@' + num + '* left *' + meta.subject + '*\n~ ᴜsᴍᴀɴ ᴍᴅ v1.0',
         mentions : [p],
       }).catch(() => {});
     }
@@ -544,3 +509,4 @@ startBot().catch(e => {
   console.log(chalk.red('  [FATAL] ' + e.message));
   setTimeout(startBot, 5000);
 });
+                              
